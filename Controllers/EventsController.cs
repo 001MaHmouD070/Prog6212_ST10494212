@@ -1,108 +1,215 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using RaceDay.Web.Services;
-using RaceDay.Web.Models.ViewModels;
-using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Raceday.API.DTOs;
+using Raceday.API.Services;
+using RacedayAPI.Data;
+using RacedayAPI.Models;
+using RacedayAPI.Services;
 
-namespace RaceDay.Web.Controllers
+namespace RacedayAPI.Controllers
 {
-    public class EventsController : Controller
+    [ApiController]
+    [Route("api/[controller]")]
+    public class EventsController : ControllerBase
     {
-        private readonly IApiService _apiService;
-        private readonly JsonSerializerOptions _jsonOptions;
+        private readonly RaceDayDbContext _context;
+        private readonly BlobService _blobService;
 
-        public EventsController(IApiService apiService)
+        public EventsController(RaceDayDbContext context, BlobService blobService) 
         {
-            _apiService = apiService;
-            // Centralise configuration to ensure consistent case-insensitive mapping across all actions
-            _jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            _context = context;
+            _blobService = blobService;
         }
 
-        // GET: /Events
-        public async Task<IActionResult> Index()
+        // GET: /api/events — Public
+        [HttpGet]
+        public async Task<IActionResult> GetAllEvents()
         {
-            var response = await _apiService.GetAsync("/api/events");
-            if (response.IsSuccessStatusCode)
-            {
-                var json = await response.Content.ReadAsStringAsync();
-                var events = JsonSerializer.Deserialize<List<EventViewModel>>(json, _jsonOptions);
-                return View(events);
-            }
-            return View(new List<EventViewModel>());
-        }
-
-        // GET: /Events/Details/5
-        public async Task<IActionResult> Details(int id)
-        {
-            var response = await _apiService.GetAsync($"/api/events/{id}");
-            if (response.IsSuccessStatusCode)
-            {
-                var json = await response.Content.ReadAsStringAsync();
-                using var document = JsonDocument.Parse(json);
-                var root = document.RootElement;
-
-                var viewModel = new EventDetailsViewModel
+            var events = await _context.Events
+                .Include(e => e.Organiser)
+                .Include(e => e.Categories)
+                .Select(e => new
                 {
-                    Event = new EventViewModel
+                    e.EventID,
+                    e.EventName,
+                    e.EventDateAndTime,
+                    e.Location,
+                    e.Distance,
+                    e.EventType,
+                    e.Status,
+                    e.MaxParticipants,
+                    e.CreatedAt,
+                    Organiser = e.Organiser == null ? null : new
                     {
-                        EventID = root.TryGetProperty("eventID", out var idProp) ? idProp.GetInt32() : root.TryGetProperty("eventId", out var idProp2) ? idProp2.GetInt32() : 0,
-                        EventName = root.TryGetProperty("eventName", out var nameProp) ? nameProp.GetString() ?? "" : "",
-                        EventDateAndTime = root.TryGetProperty("eventDateAndTime", out var dateProp) ? dateProp.GetDateTime() : DateTime.MinValue,
-                        Location = root.TryGetProperty("location", out var locProp) ? locProp.GetString() ?? "" : "",
-                        Distance = root.TryGetProperty("distance", out var distProp) ? distProp.GetDecimal() : 0,
-                        EventType = root.TryGetProperty("eventType", out var typeProp) ? typeProp.GetString() ?? "" : "",
-                        Status = root.TryGetProperty("status", out var statusProp) ? statusProp.GetString() ?? "" : ""
-                    }
-                };
+                        e.Organiser.OrganiserID,
+                        e.Organiser.CompanyName
+                    },
+                    CategoryCount = e.Categories.Count
+                })
+                .ToListAsync();
 
-                // Map Categories
-                if (root.TryGetProperty("categories", out var categoriesArray) && categoriesArray.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var cat in categoriesArray.EnumerateArray())
-                    {
-                        viewModel.Categories.Add(new CategoryViewModel
-                        {
-                            CategoryID = cat.TryGetProperty("categoryID", out var catId) ? catId.GetInt32() : cat.TryGetProperty("categoryId", out var catId2) ? catId2.GetInt32() : 0,
-                            CategoryName = cat.TryGetProperty("categoryName", out var catName) ? catName.GetString() ?? "" : "",
-                            MinAge = cat.TryGetProperty("minAge", out var minAge) ? minAge.GetInt32() : 0,
-                            MaxAge = cat.TryGetProperty("maxAge", out var maxAge) ? maxAge.GetInt32() : 0,
-                            Gender = cat.TryGetProperty("gender", out var gender) ? gender.GetString() ?? "" : "",
-                            EntryFee = cat.TryGetProperty("entryFee", out var fee) ? fee.GetDecimal() : 0
-                        });
-                    }
-                }
-
-                return View(viewModel);
-            }
-            return NotFound();
+            return Ok(events);
         }
 
-        // POST: /Events/Enrol
+        // GET: /api/events/{id} — Public
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetEventById(int id)
+        {
+            var ev = await _context.Events
+                .Include(e => e.Organiser)
+                .Include(e => e.Categories)
+                .Select(e => new
+                {
+                    e.EventID,
+                    e.EventName,
+                    e.EventDateAndTime,
+                    e.Location,
+                    e.Distance,
+                    e.EventType,
+                    e.Status,
+                    e.MaxParticipants,
+                    e.CreatedAt,
+                    Organiser = e.Organiser == null ? null : new
+                    {
+                        e.Organiser.OrganiserID,
+                        e.Organiser.CompanyName,
+                        e.Organiser.PhoneNumber
+                    },
+                    Categories = e.Categories.Select(c => new
+                    {
+                        c.CategoryID,
+                        c.CategoryName,
+                        c.MinAge,
+                        c.MaxAge,
+                        c.Gender,
+                        c.EntryFee
+                    })
+                })
+                .FirstOrDefaultAsync(e => e.EventID == id);
+
+            if (ev == null)
+                return NotFound(new { message = "Event not found." });
+
+            return Ok(ev);
+        }
+
+        // POST: /api/events — ORGANISER ONLY
         [HttpPost]
-        public async Task<IActionResult> Enrol(int eventId, int categoryId)
+        public async Task<IActionResult> CreateEvent([FromBody] EventDto eventDto)
         {
-            // Check if user is logged in
-            if (!Request.Cookies.ContainsKey(".RaceDay.Session"))
+            var userId = SessionHelper.GetUserId(HttpContext);
+            if (userId == null) return Unauthorized(new { message = "You must be logged in." });
+            if (!SessionHelper.IsInRole(HttpContext, "Organiser")) return StatusCode(403, new { message = "Only Organisers can create events." });
+
+            var organiser = await _context.Organisers.FirstOrDefaultAsync(o => o.UserID == userId.Value);
+            if (organiser == null) return StatusCode(403, new { message = "Organiser profile not found." });
+
+            var newEvent = new Event
             {
-                return RedirectToAction("Login", "Account");
-            }
+                OrganiserID = organiser.OrganiserID,
+                EventName = eventDto.EventName,
+                EventDateAndTime = eventDto.EventDateAndTime,
+                Location = eventDto.Location,
+                Distance = eventDto.Distance,
+                EventType = eventDto.EventType,
+                Status = eventDto.Status,
+                MaxParticipants = eventDto.MaxParticipants,
+                CreatedAt = DateTime.UtcNow
+            };
 
-            var enrolDto = new { CategoryID = categoryId };
-            var response = await _apiService.PostAsync($"/api/events/{eventId}/enrol", enrolDto);
+            _context.Events.Add(newEvent);
+            await _context.SaveChangesAsync();
 
-            if (response.IsSuccessStatusCode)
+            var response = new
             {
-                TempData["SuccessMessage"] = "Successfully enrolled in the event!";
-                return RedirectToAction("MyEnrolments", "Participant");
+                newEvent.EventID,
+                newEvent.EventName,
+                newEvent.EventDateAndTime,
+                newEvent.Location,
+                newEvent.Distance,
+                newEvent.EventType,
+                newEvent.Status,
+                newEvent.MaxParticipants,
+                newEvent.CreatedAt,
+                Organiser = new
+                {
+                    organiser.OrganiserID,
+                    organiser.CompanyName,
+                    organiser.PhoneNumber
+                },
+                Categories = Array.Empty<object>()
+            };
+
+            return CreatedAtAction(nameof(GetEventById), new { id = newEvent.EventID }, response);
+        }
+
+        // PUT: /api/events/{id} — ORGANISER (OWNER) ONLY
+        [HttpPut("{id}")]
+        public async Task<IActionResult> UpdateEvent(int id, [FromBody] EventDto eventDto)
+        {
+            var userId = SessionHelper.GetUserId(HttpContext);
+            if (userId == null) return Unauthorized(new { message = "You must be logged in." });
+            if (!SessionHelper.IsInRole(HttpContext, "Organiser")) return StatusCode(403, new { message = "Only Organisers can update events." });
+
+            var ev = await _context.Events.Include(e => e.Organiser).FirstOrDefaultAsync(e => e.EventID == id);
+            if (ev == null) return NotFound(new { message = "Event not found." });
+            if (ev.Organiser == null || ev.Organiser.UserID != userId.Value) return StatusCode(403, new { message = "You can only edit your own events." });
+
+            ev.EventName = eventDto.EventName;
+            ev.EventDateAndTime = eventDto.EventDateAndTime;
+            ev.Location = eventDto.Location;
+            ev.Distance = eventDto.Distance;
+            ev.EventType = eventDto.EventType;
+            ev.Status = eventDto.Status;
+            ev.MaxParticipants = eventDto.MaxParticipants;
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new { ev.EventID, ev.EventName, ev.EventDateAndTime, ev.Location, ev.Distance, ev.EventType, ev.Status, ev.MaxParticipants, ev.CreatedAt, OrganiserID = ev.Organiser?.OrganiserID, CompanyName = ev.Organiser?.CompanyName });
+        }
+
+        // DELETE: /api/events/{id} — ORGANISER (OWNER) ONLY
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteEvent(int id)
+        {
+            var userId = SessionHelper.GetUserId(HttpContext);
+            if (userId == null) return Unauthorized(new { message = "You must be logged in." });
+            if (!SessionHelper.IsInRole(HttpContext, "Organiser")) return StatusCode(403, new { message = "Only Organisers can delete events." });
+
+            var ev = await _context.Events.Include(e => e.Organiser).FirstOrDefaultAsync(e => e.EventID == id);
+            if (ev == null) return NotFound(new { message = "Event not found." });
+            if (ev.Organiser == null || ev.Organiser.UserID != userId.Value) return StatusCode(403, new { message = "You can only delete your own events." });
+
+            _context.Events.Remove(ev);
+            await _context.SaveChangesAsync();
+
+            return NoContent();
+        }
+
+        // POST: /api/events/{id}/upload-image
+        [HttpPost("{id}/upload-image")]
+        public async Task<IActionResult> UploadEventBanner(int id, IFormFile file)
+        {
+            var userId = SessionHelper.GetUserId(HttpContext);
+            if (userId == null) return Unauthorized(new { message = "You must be logged in." });
+            if (!SessionHelper.IsInRole(HttpContext, "Organiser")) return StatusCode(403, new { message = "Only Organisers can upload images." });
+
+            var ev = await _context.Events.Include(e => e.Organiser).FirstOrDefaultAsync(e => e.EventID == id);
+            if (ev == null) return NotFound(new { message = "Event not found." });
+
+            if (ev.Organiser?.UserID != userId.Value) return StatusCode(403, new { message = "You can only upload images for your own events." });
+
+            if (file == null || file.Length == 0) return BadRequest(new { message = "No file uploaded." });
+
+            try
+            {
+                var imageUrl = await _blobService.UploadFileAsync(file);
+                return Ok(new { imageUrl });
             }
-
-            // Failure block: Extract the API error message and store it in TempData
-            var errorJson = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(errorJson);
-            var errorMessage = doc.RootElement.TryGetProperty("message", out var msg) ? msg.GetString() : "Enrolment failed.";
-            TempData["ErrorMessage"] = errorMessage;
-
-            // Redirect back to the details page of the specific event
-            return RedirectToAction("Details", new { id = eventId });
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Failed to upload image.", error = ex.Message });
+            }
         }
     }
 }
