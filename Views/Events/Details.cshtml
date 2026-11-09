@@ -1,0 +1,73 @@
+﻿@model RaceDay.Web.Models.ViewModels.EventDetailsViewModel
+@{
+    ViewData["Title"] = Model.Event.EventName;
+}
+
+<div class="container mt-4">
+    <!-- Show error or success messages -->
+    @if (TempData["ErrorMessage"] != null)
+    {
+        <div class="alert alert-danger">@TempData["ErrorMessage"]</div>
+    }
+    @if (TempData["SuccessMessage"] != null)
+    {
+        <div class="alert alert-success">@TempData["SuccessMessage"]</div>
+    }
+
+    <div class="card shadow">
+        <div class="card-header bg-dark text-white">
+            <h3>@Model.Event.EventName</h3>
+        </div>
+        <div class="card-body">
+            <h5 class="card-title">@Model.Event.EventType - @Model.Event.Distance km</h5>
+            <p class="card-text">
+                <strong>Date & Time:</strong> @Model.Event.EventDateAndTime.ToString("f") <br />
+                <strong>Location:</strong> @Model.Event.Location <br />
+                <strong>Organiser:</strong> @Model.Event.OrganiserName
+            </p>
+
+            <hr />
+            <h4>Available Categories</h4>
+
+            @if (Model.Categories.Count == 0)
+            {
+                <p class="text-muted">No categories have been added to this event yet.</p>
+            }
+            else
+            {
+                <table class="table table-bordered mt-3">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Category</th>
+                            <th>Age Group</th>
+                            <th>Gender</th>
+                            <th>Fee</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var cat in Model.Categories)
+                        {
+                            <tr>
+                                <td>@cat.CategoryName</td>
+                                <td>@cat.MinAge - @cat.MaxAge</td>
+                                <td>@cat.Gender</td>
+                                <td>R @cat.EntryFee</td>
+                                <td>
+                                    <form asp-action="Enrol" method="post">
+                                        <input type="hidden" name="eventId" value="@Model.Event.EventID" />
+                                        <input type="hidden" name="categoryId" value="@cat.CategoryID" />
+                                        <button type="submit" class="btn btn-success btn-sm">Enrol Now</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+    <div class="mt-3">
+        <a asp-action="Index" class="btn btn-secondary">Back to Events</a>
+    </div>
+</div>
